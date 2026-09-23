@@ -1,0 +1,40 @@
+{
+	"name": "@aira-apps/n8n-nodes-aira",
+	"version": "0.1.4",
+	"private": false,
+	"description": "Aira's n8n community node (@aira-apps/n8n-nodes-aira). Read the company Aira Connect covers, from a workflow.",
+	"keywords": [
+		"n8n-community-node-package"
+	],
+	"homepage": "https://ai.aira.app",
+	"license": "MIT",
+	"author": {
+		"name": "Aira",
+		"email": "tech@aira.app"
+	},
+	"files": [
+		"dist",
+		"samples",
+		"assets"
+	],
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"credentials": [
+			"dist/credentials/AiraApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/Aira/Aira.node.js"
+		]
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	},
+	"packageManager": "pnpm@9.0.0",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/aira-apps/n8n-nodes-aira.git"
+	},
+	"devDependencies": {
+		"@n8n/node-cli": "^0.49.1"
+	}
+}
