@@ -1,0 +1,128 @@
+name: Publish
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOT RUN IN THIS REPO. The mirror snapshot (`scripts/connectApi/n8nMirrorSnapshot.ts`) copies
+# this file to `.github/workflows/publish.yml` in the SEPARATE `aira-apps/n8n-nodes-aira` mirror
+# on every release — never install it by hand: the snapshot is force-pushed as the mirror's whole
+# `main`, so a hand-installed copy is deleted by the next release and no publish ever runs. It is kept in the monorepo only so
+# its content is reviewed and versioned alongside the pipeline that writes it
+# (`.github/workflows/deploy-n8n.yml`), which pushes a flattened snapshot to that mirror's `main`
+# on every monorepo `apps/n8n/package.json` version bump. See root CLAUDE.md's "Connect API
+# generated artifacts" section and `apps/n8n/MAINTAINING.md` for the full pipeline.
+#
+# The mirror's `main` branch is a SNAPSHOT the monorepo force-pushes, not a repo developed in
+# directly — this workflow only reacts to that push. `dist`, the node source (`nodes/`,
+# `credentials/`, `generated/` — the Creator Portal requires it), `README.md`, `samples/`,
+# `assets/`, `package.json` and this workflow land here; tests, MAINTAINING.md,
+# eslint.config.mjs and breakingSurface.json are stripped at snapshot time.
+#
+# ⚠️ THE PUBLISHED `package.json` IS ALREADY CORRECT WHEN THIS RUNS. Name (`@aira-apps/n8n-nodes-
+# aira` — SCOPED, deliberately: npm's organization ownership model applies only to scoped
+# packages, with no transfer path for an unscoped name after the fact), `private: false`, and
+# `dist/`-prefixed `n8n.nodes`/`n8n.credentials` paths are synthesized and gated
+# (`connect-n8n:check-manifest`) in the monorepo, before the snapshot is ever pushed here — this
+# workflow does not rewrite anything.
+#
+# ⚠️ TRUSTED PUBLISHING (OIDC), NOT AN `NPM_TOKEN` SECRET. npm is deprecating 2FA-bypass
+# automation tokens' ability to publish directly (~January 2027 — see
+# https://github.blog/changelog/2026-07-08-npm-install-time-security-and-gat-bypass2fa-deprecation/),
+# so this was built on the replacement from day one rather than a token that would need migrating
+# almost immediately. There is NO npm secret on this repo at all: the npm CLI (>=11.5.1, hence the
+# explicit `npm install -g npm@latest` below — Node 22's bundled npm is not guaranteed to meet
+# that floor) auto-detects the OIDC token this job's `id-token: write` permission lets GitHub
+# Actions mint, and exchanges it with npm's registry for a short-lived publish credential. This
+# requires npmjs.com-side configuration this workflow file cannot itself provide: on the
+# `@aira-apps/n8n-nodes-aira` package's Settings → Trusted Publisher, add a GitHub Actions publisher naming
+# this exact org/repo, this exact workflow filename (`publish.yml`), and the `main` branch — all
+# fields are case-sensitive and must match exactly, or the OIDC exchange is refused.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write # required for both --provenance and the OIDC trusted-publish exchange
+
+# ⚠️ SERIALIZED, NOT CANCELLED. The monorepo's release job can, in principle, force-push here a
+# second time before this workflow's first run has finished — a merge to `main` there with no
+# version bump landing between two release runs, or a retry after a transient failure. Since
+# `main` here is a force-pushed snapshot with no history of its own, two runs of this workflow
+# racing would both try `npm publish` against the (very likely still-identical) checked-out
+# content; npm's own immutability makes a genuine duplicate a harmless, idempotent no-op (the
+# second `npm publish` of an already-published version just fails cleanly), but a NON-identical
+# second push mid-flight is exactly what this queues instead of racing. `cancel-in-progress:
+# false` because cancelling a publish mid-flight is worse than letting it finish and queuing
+# the next one behind it — a cancelled `npm publish` can leave a version half-uploaded.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+          # No `cache:` input — omitting it is what disables caching. `cache: false` is not a
+          # boolean off-switch: setup-node reads it as a package-manager name and fails the job.
+
+      # npm CLI >=11.5.1 is trusted publishing's floor. Node 22's bundled npm satisfies this on
+      # recent Node 22 patch releases, but nothing pins that — updating explicitly means a runner
+      # image regression can't silently drop this workflow below the floor and fail obscurely
+      # inside the publish step instead.
+      - name: Ensure npm CLI meets trusted publishing's floor (>=11.5.1)
+        run: npm install -g npm@latest
+
+      # No NODE_AUTH_TOKEN, no NPM_TOKEN secret anywhere in this repo — see the header. The OIDC
+      # token is matched against the Trusted Publisher configured on npmjs.com for this exact
+      # org/repo/workflow/branch.
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+
+      # ⚠️ SCAN RUNS AFTER PUBLISH, AND THAT'S NOT A ONE-STEP-TOO-LATE MISTAKE — n8n's own
+      # `@n8n/scan-community-package` (confirmed by downloading and reading its actual CLI source,
+      # not assumed) takes a PACKAGE NAME, not a local path: `analyzePackageByName(name, version)`
+      # fetches the package from npm's registry and checks its `--provenance` attestation, both of
+      # which only exist once `npm publish` has already run. There is no local-directory mode to
+      # scan before publishing with n8n's own tool — this mirrors how the Creator Portal's own
+      # human review is ALSO inherently post-publish (see the ticket: "n8n's own review happens
+      # there, after npm has the package"). A failed scan here means a real, already-shipped
+      # problem to fix in the next version — npm's immutability makes that true regardless of
+      # step ordering, not because of anything this workflow could have done differently.
+      #
+      # ⚠️ PINNED VERSION, AND MANUAL EXIT-CODE HANDLING. The CLI's own `cli.mjs` never calls
+      # `process.exit(1)` on a failed scan (`result.passed === false`) — only on a thrown
+      # exception — so `npx`'s own exit code can't be trusted to fail this job; the grep below
+      # does that instead. Bump the pinned version deliberately, not via `@latest`, so a scanner
+      # release can't silently change what "passing" means for an already-reviewed package.
+      - name: Community-package scan
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          # Retried: npm serves the provenance attestation a while after publish, so a scan run
+          # seconds later fails its provenance check on a healthy package (0.1.1 did exactly this).
+          # The step runs under `bash -e`, so the scanner's exit status is captured with `|| …`
+          # rather than left to abort the step before a retry can happen.
+          for ATTEMPT in 1 2 3 4 5 6; do
+            SCAN_EXIT=0
+            SCAN_OUTPUT=$(npx --yes @n8n/scan-community-package@0.37.0 "@aira-apps/n8n-nodes-aira@$VERSION" 2>&1) || SCAN_EXIT=$?
+            if [ "$SCAN_EXIT" -eq 0 ] && ! echo "$SCAN_OUTPUT" | grep -q '❌'; then break; fi
+            if [ "$ATTEMPT" -lt 6 ]; then echo "Scan attempt $ATTEMPT failed; retrying in 30s…"; sleep 30; fi
+          done
+          echo "$SCAN_OUTPUT"
+          if [ "$SCAN_EXIT" -ne 0 ] || echo "$SCAN_OUTPUT" | grep -q '❌'; then
+            echo ""
+            echo "❌ Community-package scan failed. The version above is already published and"
+            echo "   immutable — fix in the next version, not this one."
+            exit 1
+          fi
+
+      - name: Print the version and the Portal URL
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "✅ Published @aira-apps/n8n-nodes-aira@$VERSION to npm."
+          echo "   Submit it for review at https://creators.n8n.io/"
+          echo "   ⚠️ Portal submission is a manual, named-owner step — nothing here automates it."
